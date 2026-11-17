@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import csv
 from dataclasses import replace
-from math import degrees, hypot, pi
+from math import degrees, hypot, pi, radians
 from pathlib import Path
 from typing import Any
 
@@ -109,29 +109,43 @@ def _step(physics: PhysicsConfig, controller: GeometricControllerConfig, dt: flo
 
 def _trim(physics: PhysicsConfig, controller: GeometricControllerConfig, dt: float,
            options: dict[str, Any], out: Path | None) -> int:
-    """Volo livellato a velocità costante nel piano x-z: inclinazione e giri di equilibrio."""
+    """Volo livellato a velocità costante nel piano x-z: inclinazione e giri di equilibrio.
+
+    Con un'ala gli equilibri possono essere due (ala portante a bassa incidenza, corpo di
+    traverso ad alta incidenza): si parte sia dalla soluzione precedente sia da un assetto
+    di crociera, e fra gli equilibri trovati si tiene quello di potenza minima.
+    """
     from scipy.optimize import least_squares
 
     model, _ = build(physics, controller)
     speeds = [float(v) for v in options["speeds"].split(",")]
     rows = []
-    print(" V [m/s] | incl. [gradi] | giri [rpm] | spinta tot [N] | potenza [W] | L [N] | D [N]"
-          " | momento aero [Nm]")
+    print(" V [m/s] | incl. [gradi] | alpha [gradi] | giri [rpm] | spinta tot [N] | potenza [W]"
+          " | L [N] | D [N] | momento aero [Nm]")
     guess = np.array([0.3, model.hover_omega()])
+    cruise_guess = np.array([radians(80.0), model.hover_omega() * 0.6])
+    tolerance = 0.01 * model.mass_kg * G
     for speed in speeds:
         def residual(x: np.ndarray, speed: float = speed) -> np.ndarray:
             force, _ = _level_flight_forces(model, speed, x[0], x[1])
             return force[[0, 2]] / (model.mass_kg * G)
 
-        sol = least_squares(residual, guess, bounds=([0.0, 1.0], [pi / 2, 1e5]))
+        best = None
+        for start in (guess, cruise_guess):
+            sol = least_squares(residual, start, bounds=([0.0, 1.0], [pi / 2, 1e5]))
+            force, info = _level_flight_forces(model, speed, *sol.x)
+            ok = bool(np.linalg.norm(force[[0, 2]]) < tolerance)
+            key = (not ok, info["power"])
+            if best is None or key < best[0]:
+                best = (key, sol, info, ok)
+        _, sol, info, ok = best
         pitch, omega = sol.x
-        force, info = _level_flight_forces(model, speed, pitch, omega)
-        ok = np.linalg.norm(force[[0, 2]]) < 0.01 * model.mass_kg * G
-        print(f" {speed:7.1f} | {degrees(pitch):13.1f} | {omega / RPM_TO_RAD_S:10.0f} | "
-              f"{info['thrust']:14.2f} | {info['power']:11.0f} | {info['lift']:5.2f} | "
-              f"{info['drag']:5.2f} | {info['moment']:8.3f}{'' if ok else '  (non in equilibrio)'}")
-        rows.append({"speed": speed, "pitch_deg": degrees(pitch), "rpm": omega / RPM_TO_RAD_S,
-                     **info, "converged": ok})
+        print(f" {speed:7.1f} | {degrees(pitch):13.1f} | {90.0 - degrees(pitch):13.2f} | "
+              f"{omega / RPM_TO_RAD_S:10.0f} | {info['thrust']:14.2f} | {info['power']:11.0f} | "
+              f"{info['lift']:5.2f} | {info['drag']:5.2f} | "
+              f"{info['moment']:8.3f}{'' if ok else '  (non in equilibrio)'}")
+        rows.append({"speed": speed, "pitch_deg": degrees(pitch), "alpha_deg": 90.0 - degrees(pitch),
+                     "rpm": omega / RPM_TO_RAD_S, **info, "converged": ok})
         guess = sol.x
     _save_rows(rows, out, "trim.csv")
     return 0

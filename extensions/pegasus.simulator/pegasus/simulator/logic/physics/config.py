@@ -192,6 +192,56 @@ class StationsConfig:
 
 
 @dataclass
+class PolarCaseConfig:
+    """Una polare dell'airframe completo a un numero di Reynolds (es. da VSPAERO + XFOIL)."""
+
+    name: str = ""
+    reynolds_per_m: float = 1.0e6  # V / nu del caso
+    alpha_stall_deg: float = 14.0  # oltre: raccordo al modello di corpo
+    alpha_deg: list[float] = field(default_factory=list)  # griglia strettamente crescente
+    cl: list[float] = field(default_factory=list)  # CL riferito a PolarConfig.s_ref_m2
+    cd: list[float] = field(default_factory=list)  # CD riferito a PolarConfig.s_ref_m2
+
+    def __post_init__(self) -> None:
+        n = len(self.alpha_deg)
+        if n < 2 or len(self.cl) != n or len(self.cd) != n:
+            raise ValueError(f"polare {self.name!r}: alpha_deg, cl e cd devono avere la stessa "
+                             "lunghezza, almeno 2 punti")
+        if any(b <= a for a, b in zip(self.alpha_deg, self.alpha_deg[1:])):
+            raise ValueError(f"polare {self.name!r}: alpha_deg deve essere strettamente crescente")
+        if not self.alpha_deg[0] <= self.alpha_stall_deg <= self.alpha_deg[-1]:
+            raise ValueError(f"polare {self.name!r}: alpha_stall_deg fuori dalla griglia di alpha")
+        if self.reynolds_per_m <= 0:
+            raise ValueError(f"polare {self.name!r}: reynolds_per_m deve essere positivo")
+
+
+@dataclass
+class PolarConfig:
+    """Polari CL(alpha), CD(alpha) dell'airframe completo, interpolate sul Reynolds.
+
+    Fino allo stallo sostituiscono MultirotorAero; fra stallo e stallo + blend_deg si
+    raccordano linearmente al modello di corpo (`body`), che vale da solo fino a 90 gradi.
+    Comprendono già ala e corpi: con la polare attiva i bracci-ala (`wing`) vanno spenti.
+    """
+
+    enabled: bool = False
+    s_ref_m2: float = 0.0  # superficie di riferimento dei coefficienti
+    blend_deg: float = 5.0  # ampiezza del raccordo oltre lo stallo
+    cases: list[PolarCaseConfig] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.blend_deg <= 0:
+            raise ValueError("polar.blend_deg deve essere positivo")
+        if not self.enabled:
+            return
+        if not self.cases or self.s_ref_m2 <= 0:
+            raise ValueError("polar.enabled richiede almeno un caso e s_ref_m2 > 0")
+        reynolds = [c.reynolds_per_m for c in self.cases]
+        if len(set(reynolds)) != len(reynolds):
+            raise ValueError("polar.cases: i reynolds_per_m devono essere distinti")
+
+
+@dataclass
 class AeroConfig:
     """Aerodinamica dell'airframe: MultirotorAero di FAST-UAV, generalizzato in 3D."""
 
@@ -200,7 +250,13 @@ class AeroConfig:
     wing: WingConfig = field(default_factory=WingConfig)
     spinner: SpinnerConfig = field(default_factory=SpinnerConfig)
     stations: StationsConfig = field(default_factory=StationsConfig)
+    polar: PolarConfig = field(default_factory=PolarConfig)
     min_airspeed_m_s: float = 0.3  # sotto: forze nulle
+
+    def __post_init__(self) -> None:
+        if self.polar.enabled and self.wing.enabled:
+            raise ValueError("aero.polar e aero.wing non possono essere attivi insieme: la "
+                             "polare comprende già l'ala (resistenza contata due volte)")
 
 
 @dataclass
@@ -269,8 +325,11 @@ def from_dict(cls: type[T], data: Mapping[str, Any] | None) -> T:
     kwargs = {}
     for name, value in data.items():
         hint = hints[name]
+        args = typing.get_args(hint)
         if is_dataclass(hint):
             value = from_dict(hint, value)
+        elif typing.get_origin(hint) is list and args and is_dataclass(args[0]):
+            value = [from_dict(args[0], item) for item in value]
         elif isinstance(value, tuple):
             value = list(value) if typing.get_origin(hint) is list else value
         kwargs[name] = value

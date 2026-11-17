@@ -103,6 +103,7 @@ class AdvancedMultirotorPhysics:
             "lift": aero.lift_n, "drag": aero.drag_n, "pitching_moment": aero.pitching_moment_nm,
             "bus_voltage": self.battery.voltage_v, "bus_current": self.battery.current_a,
             "bus_power": bus_power, "dod": self.battery.depth_of_discharge,
+            "polar_weight": aero.polar_weight,
         })
         return Wrench(thrust, omega, aero.force_n, torque, tele)
 

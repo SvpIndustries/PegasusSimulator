@@ -15,6 +15,8 @@ Setting `MultirotorConfig.physics` enables the advanced model in
 - propellers: `Ct`, `Cp` as functions of pitch, advance ratio and disk incidence, tip-Mach cap;
 - battery: open-circuit voltage vs. depth of discharge, sag under load;
 - airframe: body, arm-wings and spinners (`MultirotorAero`), extended to 3D, with constant wind;
+  optional airframe polars `aero.polar` (CL, CD vs. incidence, one table per Reynolds number,
+  interpolated on V/ν) that replace the body model up to stall and blend into it beyond;
 - rigid body: mass, CG and inertia of the complete drone written to the USD `body` prim at spawn.
 
 ```python
