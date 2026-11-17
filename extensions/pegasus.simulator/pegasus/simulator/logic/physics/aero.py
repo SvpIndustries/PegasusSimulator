@@ -71,15 +71,16 @@ class PolarTable:
         i, j, w = self._between(reynolds_per_m)
         return (1.0 - w) * self.cases[i].alpha_stall_deg + w * self.cases[j].alpha_stall_deg
 
-    def coefficients(self, alpha_deg: float, reynolds_per_m: float) -> tuple[float, float]:
-        """(CL, CD) ad alpha [gradi], con alpha limitato alla griglia di ogni caso."""
+    def coefficients(self, alpha_deg: float, reynolds_per_m: float) -> tuple[float, float, float]:
+        """(CL, CD, CM) ad alpha [gradi], alpha limitato alla griglia; CM = 0 se manca."""
         i, j, w = self._between(reynolds_per_m)
         values = []
         for case in (self.cases[i], self.cases[j]):
+            cm = float(np.interp(alpha_deg, case.alpha_deg, case.cm)) if case.cm else 0.0
             values.append((float(np.interp(alpha_deg, case.alpha_deg, case.cl)),
-                           float(np.interp(alpha_deg, case.alpha_deg, case.cd))))
-        (cl_i, cd_i), (cl_j, cd_j) = values
-        return (1.0 - w) * cl_i + w * cl_j, (1.0 - w) * cd_i + w * cd_j
+                           float(np.interp(alpha_deg, case.alpha_deg, case.cd)), cm))
+        a, b = values
+        return tuple((1.0 - w) * x + w * y for x, y in zip(a, b))
 
 
 def build_multirotor_aero(s: AeroConfig) -> MultirotorAero:
@@ -115,9 +116,12 @@ class Airframe:
         self.polar = PolarTable(settings.polar) if settings.enabled and settings.polar.enabled else None
         # ascissa del baricentro dal muso, positiva verso la coda
         self.x_cg_from_nose = settings.stations.nose_z_m - cg_z_m
+        # braccio del punto di riferimento di Cm rispetto al baricentro, lungo +z
+        self.moment_arm_z = settings.polar.moment_ref_z_m - cg_z_m
+        self.polar_moment = self.polar is not None and settings.polar.moment_enabled
 
-    def polar_forces(self, v: float, a_j: float) -> tuple[float, float, float] | None:
-        """(L, D, peso della polare) dalle polari, o None se la polare non è attiva."""
+    def polar_forces(self, v: float, a_j: float) -> tuple[float, float, float, float] | None:
+        """(L, D, M al punto di riferimento, peso della polare), o None senza polare."""
         if self.polar is None:
             return None
         a_deg = degrees(a_j)
@@ -125,10 +129,19 @@ class Airframe:
         stall = self.polar.stall_deg(reynolds)
         weight = min(max(1.0 - (a_deg - stall) / self.polar.blend_deg, 0.0), 1.0)
         if weight <= 0.0:
-            return 0.0, 0.0, 0.0
-        cl, cd = self.polar.coefficients(min(a_deg, stall), reynolds)
+            return 0.0, 0.0, 0.0, 0.0
+        cl, cd, cm = self.polar.coefficients(min(a_deg, stall), reynolds)
         q_s = 0.5 * self.rho * v * v * self.polar.s_ref_m2
-        return q_s * cl, q_s * cd, weight
+        moment = q_s * self.s.polar.c_ref_m * cm if self.polar_moment else 0.0
+        return q_s * cl, q_s * cd, moment, weight
+
+    @staticmethod
+    def body_force(lift: float, drag: float, a_j: float, air: AirData) -> np.ndarray:
+        """(L, D) in assi vento -> forza in assi corpo (normale N e assiale A)."""
+        normal = lift * cos(a_j) + drag * sin(a_j)
+        axial = drag * cos(a_j) - lift * sin(a_j)
+        axial_sign = -1.0 if air.u[2] >= 0 else 1.0
+        return -normal * air.normal_dir + axial_sign * axial * E3
 
     def load(self, air: AirData) -> AeroLoad:
         if self.model is None or air.airspeed < self.s.min_airspeed_m_s:
@@ -144,18 +157,23 @@ class Airframe:
         weight = 0.0
         polar = None if tail_first else self.polar_forces(v, a_j)
         if polar is not None:
-            polar_lift, polar_drag, weight = polar
+            polar_lift, polar_drag, polar_moment, weight = polar
             lift = weight * polar_lift + (1.0 - weight) * lift
             drag = weight * polar_drag + (1.0 - weight) * drag
         # (L, D) in assi vento -> (N, A) in assi corpo: inversa della rotazione di body_forces
-        normal = lift * cos(a_j) + drag * sin(a_j)
-        axial = drag * cos(a_j) - lift * sin(a_j)
-        axial_sign = -1.0 if air.u[2] >= 0 else 1.0
-        force = -normal * air.normal_dir + axial_sign * axial * E3
+        force = self.body_force(lift, drag, a_j, air)
         moment = 0.0
         torque = np.zeros(3)
+        # asse del momento: positivo = aumenta l'incidenza (ruota +z lontano da u)
+        pitch_axis = np.cross(air.normal_dir, E3)
         if self.s.stations.enabled and not tail_first and np.any(air.normal_dir):
             moment = self.model.pitching_moment(v, alpha, self.rho, self.x_cg_from_nose)
-            # positivo = aumenta l'incidenza: ruota +z lontano da u, verso -u_normale
-            torque = moment * np.cross(air.normal_dir, E3)
+            torque = moment * pitch_axis
+        if self.polar_moment and weight > 0.0 and np.any(air.normal_dir):
+            # Cm al punto di riferimento + trasporto al baricentro delle forze della polare
+            polar_force = self.body_force(polar_lift, polar_drag, a_j, air)
+            polar_torque = (polar_moment * pitch_axis
+                            + np.cross(self.moment_arm_z * E3, polar_force))
+            torque = weight * polar_torque + (1.0 - weight) * torque
+            moment = float(torque @ pitch_axis)
         return AeroLoad(force, torque, lift, drag, moment, weight)

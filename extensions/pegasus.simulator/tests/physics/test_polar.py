@@ -114,3 +114,42 @@ def test_from_dict_builds_polar_cases() -> None:
                    "alpha_deg": [0.0, 10.0], "cl": [0.0, 1.0], "cd": [0.1, 0.2]}]}}})
     assert isinstance(config.aero.polar.cases[0], PolarCaseConfig)
     assert config.aero.polar.cases[0].cl == [0.0, 1.0]
+
+
+# ---------------------------------------------------------------- momento (Cm)
+
+def with_moment(cm: list[float], c_ref: float = 0.1, ref_z: float = 0.0) -> PhysicsConfig:
+    config = physics(replace(LOW, cm=cm))
+    config.aero.polar = replace(config.aero.polar, moment_enabled=True, c_ref_m=c_ref,
+                                moment_ref_z_m=ref_z)
+    return config
+
+
+def test_moment_is_off_by_default() -> None:
+    load = load_at(airframe(physics(replace(LOW, cm=[0.1] * 4))), 30.0, 5.0)
+    assert not np.any(load.torque_nm)
+
+
+def test_moment_at_the_cg_is_q_s_c_cm() -> None:
+    speed = 30.0
+    load = load_at(airframe(with_moment([0.05] * 4)), speed, 5.0)
+    expected = 0.5 * RHO * speed**2 * 0.03 * 0.1 * 0.05
+    assert isclose(load.pitching_moment_nm, expected, rel_tol=1e-9)
+    assert isclose(float(np.linalg.norm(load.torque_nm)), expected, rel_tol=1e-9)
+
+
+def test_moment_reference_is_transported_to_the_cg() -> None:
+    """Cm nullo al punto di riferimento 0,2 m davanti al baricentro: resta r x F."""
+    frame = airframe(with_moment([0.0] * 4, ref_z=0.2))
+    load = load_at(frame, 30.0, 5.0)
+    assert np.allclose(load.torque_nm, np.cross([0.0, 0.0, 0.2], load.force_n))
+
+
+def test_moment_config_validation() -> None:
+    with pytest.raises(ValueError, match="lunghezza"):
+        replace(LOW, cm=[0.0, 0.1])
+    with pytest.raises(ValueError, match="c_ref_m"):
+        PolarConfig(enabled=True, s_ref_m2=0.03, cases=[replace(LOW, cm=[0.0] * 4)],
+                    moment_enabled=True)
+    with pytest.raises(ValueError, match="mancano i cm"):
+        PolarConfig(enabled=True, s_ref_m2=0.03, cases=[LOW], moment_enabled=True, c_ref_m=0.1)

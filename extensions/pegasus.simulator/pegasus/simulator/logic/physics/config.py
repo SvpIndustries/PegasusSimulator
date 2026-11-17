@@ -201,12 +201,17 @@ class PolarCaseConfig:
     alpha_deg: list[float] = field(default_factory=list)  # griglia strettamente crescente
     cl: list[float] = field(default_factory=list)  # CL riferito a PolarConfig.s_ref_m2
     cd: list[float] = field(default_factory=list)  # CD riferito a PolarConfig.s_ref_m2
+    # Cm attorno a PolarConfig.moment_ref_z_m, riferito a s_ref_m2 e c_ref_m, positivo se
+    # AUMENTA l'incidenza (muso su, lontano dal vento); vuoto = non disponibile
+    cm: list[float] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         n = len(self.alpha_deg)
         if n < 2 or len(self.cl) != n or len(self.cd) != n:
             raise ValueError(f"polare {self.name!r}: alpha_deg, cl e cd devono avere la stessa "
                              "lunghezza, almeno 2 punti")
+        if self.cm and len(self.cm) != n:
+            raise ValueError(f"polare {self.name!r}: cm deve avere la lunghezza di alpha_deg")
         if any(b <= a for a, b in zip(self.alpha_deg, self.alpha_deg[1:])):
             raise ValueError(f"polare {self.name!r}: alpha_deg deve essere strettamente crescente")
         if not self.alpha_deg[0] <= self.alpha_stall_deg <= self.alpha_deg[-1]:
@@ -222,12 +227,19 @@ class PolarConfig:
     Fino allo stallo sostituiscono MultirotorAero; fra stallo e stallo + blend_deg si
     raccordano linearmente al modello di corpo (`body`), che vale da solo fino a 90 gradi.
     Comprendono già ala e corpi: con la polare attiva i bracci-ala (`wing`) vanno spenti.
+
+    Momento (opzionale, `moment_enabled`): Cm dei casi attorno al punto di riferimento
+    `moment_ref_z_m` (sull'asse del corpo), riportato al baricentro con le forze della polare.
+    Nel raccordo oltre lo stallo si pesa come le forze; sostituisce il momento delle stazioni.
     """
 
     enabled: bool = False
     s_ref_m2: float = 0.0  # superficie di riferimento dei coefficienti
     blend_deg: float = 5.0  # ampiezza del raccordo oltre lo stallo
     cases: list[PolarCaseConfig] = field(default_factory=list)
+    moment_enabled: bool = False  # usa i Cm dei casi per il momento di beccheggio
+    c_ref_m: float = 0.0  # lunghezza di riferimento di Cm (corda media aerodinamica)
+    moment_ref_z_m: float = 0.0  # quota z del punto di riferimento di Cm, frame del corpo
 
     def __post_init__(self) -> None:
         if self.blend_deg <= 0:
@@ -239,6 +251,12 @@ class PolarConfig:
         reynolds = [c.reynolds_per_m for c in self.cases]
         if len(set(reynolds)) != len(reynolds):
             raise ValueError("polar.cases: i reynolds_per_m devono essere distinti")
+        if self.moment_enabled:
+            if self.c_ref_m <= 0:
+                raise ValueError("polar.moment_enabled richiede c_ref_m > 0")
+            missing = [c.name for c in self.cases if not c.cm]
+            if missing:
+                raise ValueError(f"polar.moment_enabled: mancano i cm dei casi {missing}")
 
 
 @dataclass
