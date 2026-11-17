@@ -13,3 +13,10 @@ try:
 except:
     import carb
     carb.log_warn("ROS2 package not installed. ROS2Backend will not be available")
+
+# Controllore di prova della fisica avanzata (richiede fastuav)
+try:
+    from .geometric_controller_backend import GeometricControllerBackend
+except ImportError as error:  # fastuav non installata: fisica avanzata non disponibile
+    import carb
+    carb.log_info(f"GeometricControllerBackend non disponibile ({error})")

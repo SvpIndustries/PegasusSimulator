@@ -84,4 +84,7 @@ class VehicleParser(Parser):
         multirotor_configuration.sensors = sensors
         multirotor_configuration.backends = backends
 
+        # Optional advanced physics (dict, even partial; see logic/physics/config.py)
+        multirotor_configuration.physics = data_dict.get("physics", None)
+
         return multirotor_configuration

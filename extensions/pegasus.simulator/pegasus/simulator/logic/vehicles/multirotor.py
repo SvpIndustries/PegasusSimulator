@@ -7,6 +7,7 @@
 
 import numpy as np
 
+import carb
 from omni.isaac.dynamic_control import _dynamic_control
 
 # The vehicle interface
@@ -54,6 +55,12 @@ class MultirotorConfig:
         # or your own custom Backend implementation!
         self.backends = [PX4MavlinkBackend(config=PX4MavlinkBackendConfig())]
 
+        # Optional advanced physics (pegasus.simulator.logic.physics, requires fastuav).
+        # None: quadratic thrust curve + linear drag above. A PhysicsConfig or a dict (even
+        # partial): motor, propeller (Ct/Cp with advance ratio and incidence), battery and
+        # airframe aerodynamics, with mass, CG and inertia written to the USD at spawn.
+        self.physics = None
+
 
 class Multirotor(Vehicle):
     """Multirotor class - It defines a base interface for creating a multirotor
@@ -87,13 +94,22 @@ class Multirotor(Vehicle):
         self._thrusters = config.thrust_curve
         self._drag = config.drag
 
+        # Optional advanced physics (see MultirotorConfig.physics)
+        self._physics = None
+        physics = getattr(config, "physics", None)
+        if physics is not None:
+            self._setup_advanced_physics(physics)
+
     def start(self):
-        """In this case we do not need to do anything extra when the simulation starts"""
-        pass
+        """Resets the advanced physics state (rotor speeds, battery) when the simulation starts"""
+        if self._physics is not None:
+            self._physics.reset(0.0)
+            self._physics_time_s = 0.0
 
     def stop(self):
-        """In this case we do not need to do anything extra when the simulation stops"""
-        pass
+        """Closes the advanced physics log when the simulation stops"""
+        if self._physics is not None:
+            self._physics_logger.close()
 
     def update(self, dt: float):
         """
@@ -106,6 +122,10 @@ class Multirotor(Vehicle):
         """
 
         # Get the articulation root of the vehicle
+        if self._physics is not None:
+            self._update_advanced_physics(dt)
+            return
+
         articulation = self.get_dc_interface().get_articulation(self._stage_prefix)
 
         # Get the desired angular velocities for each rotor from the first backend (can be mavlink or other) expressed in rad/s
@@ -137,6 +157,116 @@ class Multirotor(Vehicle):
         self.apply_force(drag, body_part="/body")
 
         # Call the update methods in all backends
+        for backend in self._backends:
+            backend.update(dt)
+
+    # --------------------------------------------------------------------
+    # -------------------- Advanced physics (optional) -------------------
+    # --------------------------------------------------------------------
+
+    def _setup_advanced_physics(self, physics):
+        """Builds the advanced physics model and writes mass properties to the USD.
+
+        Args:
+            physics (PhysicsConfig | dict): see pegasus.simulator.logic.physics.config
+        """
+        from pegasus.simulator.logic.physics.config import PhysicsConfig
+        from pegasus.simulator.logic.physics.log import PhysicsLogger
+        from pegasus.simulator.logic.physics.model import AdvancedMultirotorPhysics
+
+        config = PhysicsConfig.coerce(physics)
+        self._physics = AdvancedMultirotorPhysics(config)
+        self._physics_logger = PhysicsLogger(config.log)
+        self._physics_time_s = 0.0
+        self.last_wrench = None
+        # Equivalent quadratic curve: only for the rotor directions (propeller animation) and
+        # force_and_torques_to_velocities. Forces come from the advanced model.
+        self._thrusters = QuadraticThrustCurve(self._physics.equivalent_thrust_curve())
+        self._drag = None
+        self._apply_mass_properties(config)
+
+    def _apply_mass_properties(self, config):
+        """Writes mass, CG and inertia of the complete drone (config.rigid_body) to the USD.
+
+        The rotors keep their USD mass; the `body` prim gets the rest.
+        """
+        from pxr import Gf, UsdGeom, UsdPhysics
+
+        from pegasus.simulator.logic.physics.provenance import fastuav_version
+        from pegasus.simulator.logic.physics.rigid_body import body_mass_properties, rotor_layout_mismatch
+
+        stage = self._current_stage
+        body = stage.GetPrimAtPath(self._stage_prefix + "/body")
+        if not body.IsValid():
+            raise ValueError(f"prim {self._stage_prefix}/body not found: the USD is not a Pegasus multirotor")
+        to_body = UsdGeom.Xformable(body).ComputeLocalToWorldTransform(0).GetInverse()
+        rotors = []
+        for i in range(4):
+            prim = stage.GetPrimAtPath(f"{self._stage_prefix}/rotor{i}")
+            if not prim.IsValid():
+                raise ValueError(f"prim {self._stage_prefix}/rotor{i} not found")
+            world = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(0)
+            position = np.array(to_body.Transform(world.ExtractTranslation()))
+            mass_attr = UsdPhysics.MassAPI(prim).GetMassAttr() if prim.HasAPI(UsdPhysics.MassAPI) else None
+            mass = float(mass_attr.Get()) if mass_attr and mass_attr.Get() is not None else 0.0
+            rotors.append((mass, position, None))
+
+        props = body_mass_properties(config.rigid_body, rotors)
+        mass_api = UsdPhysics.MassAPI.Apply(body)
+        mass_api.CreateMassAttr().Set(float(props.mass_kg))
+        mass_api.CreateCenterOfMassAttr().Set(Gf.Vec3f(*[float(v) for v in props.center_of_mass_m]))
+        mass_api.CreateDiagonalInertiaAttr().Set(Gf.Vec3f(*[float(v) for v in props.diagonal_inertia]))
+        x, y, z, w = (float(v) for v in props.principal_axes_xyzw)
+        mass_api.CreatePrincipalAxesAttr().Set(Gf.Quatf(w, x, y, z))
+        mass_api.CreateDensityAttr().Set(0.0)
+
+        self.mass_properties = {"body": props, "rotor_masses_kg": [m for m, _, _ in rotors],
+                                "rotor_positions_m": [p for _, p, _ in rotors]}
+        carb.log_info(
+            f"[Multirotor] advanced physics: total mass {config.rigid_body.mass_kg:.3f} kg "
+            f"(body {props.mass_kg:.3f} + rotors {[round(m, 4) for m, _, _ in rotors]}), "
+            f"body CG {[round(float(v), 4) for v in props.center_of_mass_m]}, "
+            f"principal inertia {[round(float(v), 5) for v in props.diagonal_inertia]}")
+        for problem in rotor_layout_mismatch(config.rotors.positions_m, self.mass_properties["rotor_positions_m"]):
+            carb.log_warn(f"[Multirotor] physics.rotors.positions_m differs from the USD: {problem}")
+        try:
+            carb.log_info(f"[Multirotor] fastuav: {fastuav_version()}")
+        except Exception as error:  # informative only
+            carb.log_warn(f"[Multirotor] fastuav version not available: {error}")
+
+    def _update_advanced_physics(self, dt: float):
+        """Physics step with the advanced model: rotor thrusts, aerodynamic force and torques.
+
+        Args:
+            dt (float): The time elapsed between the previous and current function calls (s).
+        """
+        from pegasus.simulator.logic.physics.frames import BodyState
+
+        articulation = self.get_dc_interface().get_articulation(self._stage_prefix)
+        if len(self._backends) != 0:
+            commands = self._backends[0].input_reference()
+        else:
+            commands = [0.0] * 4
+
+        state = BodyState.from_pegasus(self._state)
+        wrench = self._physics.step(state, commands, dt)
+        self.last_wrench = wrench
+
+        # Thrust of each rotor along its +z axis
+        for i in range(4):
+            thrust = float(wrench.rotor_thrust_n[i])
+            self.apply_force([0.0, 0.0, thrust], body_part="/rotor" + str(i))
+            self.handle_propeller_visual(i, thrust, articulation)
+
+        # Aerodynamic force at the CG, rotor reaction + aerodynamic moment on the body
+        if np.any(wrench.body_force_n):
+            self.apply_force([float(v) for v in wrench.body_force_n],
+                             pos=[float(v) for v in self._physics.cg], body_part="/body")
+        self.apply_torque([float(v) for v in wrench.body_torque_nm], "/body")
+
+        self._physics_time_s += dt
+        self._physics_logger.write(self._physics_time_s, state, wrench)
+
         for backend in self._backends:
             backend.update(dt)
 

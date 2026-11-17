@@ -6,4 +6,10 @@
 __author__ = "Marcelo Jacinto"
 __email__ = "marcelo.jacinto@tecnico.ulisboa.pt"
 
-from .extension import Pegasus_SimulatorExtension
+# Isaac Sim / Kit modules are only available inside the simulator. Outside of it (offline
+# physics, tests, configuration checks) the pure-Python parts of the package stay importable.
+try:
+    from .extension import Pegasus_SimulatorExtension
+except ImportError as _error:
+    if (_error.name or "").split(".")[0] not in ("omni", "carb", "pxr", "isaacsim", "usdrt"):
+        raise
