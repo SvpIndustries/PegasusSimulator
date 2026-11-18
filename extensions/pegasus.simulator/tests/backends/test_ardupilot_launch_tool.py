@@ -72,3 +72,18 @@ def test_does_not_touch_the_source_environment():
     tool.clean_sitl_environment(source)
     assert source["PYTHONHOME"] == f"{ISAAC}/kit/python"
     assert tool.clean_sitl_environment(source)["PATH"] == "/usr/bin"
+
+
+def test_sitl_binary_per_vehicle():
+    assert tool.sitl_binary("ArduCopter") == "arducopter"
+    assert tool.sitl_binary("ArduPlane") == "arduplane"
+    assert tool.sitl_binary("Blimp") == "blimp"
+
+
+def test_default_vehicle_is_copter_and_binary_check_follows_the_vehicle(tmp_path):
+    (tmp_path / "build/sitl/bin").mkdir(parents=True)
+    (tmp_path / "build/sitl/bin/arduplane").write_text("")
+    copter = tool.ArduPilotLaunchTool(str(tmp_path))
+    plane = tool.ArduPilotLaunchTool(str(tmp_path), vehicle="ArduPlane")
+    assert copter.vehicle == "ArduCopter" and not copter._sitl_already_exists()
+    assert plane._sitl_already_exists()

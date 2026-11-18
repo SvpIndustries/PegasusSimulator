@@ -256,6 +256,8 @@ class ArduPilotMavlinkBackendConfig(BackendConfig):
         self.ardupilot_vehicle_model: str = config.get(
             "ardupilot_vehicle_model", "gazebo-iris"
         )
+        # ArduPilot vehicle passed to sim_vehicle.py -v (e.g. "ArduCopter", "ArduPlane")
+        self.ardupilot_vehicle: str = config.get("ardupilot_vehicle", "ArduCopter")
 
         # Configurations to interpret the rotors control messages coming from mavlink
         self.enable_lockstep: bool = config.get("enable_lockstep", False)
@@ -317,6 +319,7 @@ class ArduPilotMavlinkBackend(Backend):
         self.ardupilot_vehicle_model: str = (
             config.ardupilot_vehicle_model
         )  # only needed if ardupilot_autolaunch == True
+        self.ardupilot_vehicle: str = config.ardupilot_vehicle
         self.ardupilot_tool: ArduPilotLaunchTool = None
         self.ardupilot_dir: str = config.ardupilot_dir
 
@@ -585,7 +588,8 @@ class ArduPilotMavlinkBackend(Backend):
                 f"[ArduPilotMavlinkBackend] About to call launch_ardupilot() with dir={self.ardupilot_dir}, id={self._vehicle_id}, model={self.ardupilot_vehicle_model}"
             )
             self.ardupilot_tool = ArduPilotLaunchTool(
-                self.ardupilot_dir, self._vehicle_id, self.ardupilot_vehicle_model
+                self.ardupilot_dir, self._vehicle_id, self.ardupilot_vehicle_model,
+                vehicle=self.ardupilot_vehicle,
             )
             self.ardupilot_tool.launch_ardupilot()
 

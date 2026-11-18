@@ -14,6 +14,20 @@ import subprocess
 import psutil
 
 
+# SITL binary built for each sim_vehicle.py -v vehicle (build/sitl/bin/<name>)
+SITL_BINARIES = {
+    "ArduCopter": "arducopter",
+    "ArduPlane": "arduplane",
+    "Rover": "ardurover",
+    "ArduSub": "ardusub",
+}
+
+
+def sitl_binary(vehicle):
+    """Name of the SITL binary of an ArduPilot vehicle (e.g. "ArduPlane" -> "arduplane")."""
+    return SITL_BINARIES.get(vehicle, vehicle.lower())
+
+
 # Variables set by Isaac Sim's python.sh that must not leak into the SITL processes: they make the
 # system python3 (gnome-terminal, sim_vehicle.py, MAVProxy) load Isaac's Python 3.11 stdlib and libcarb.
 _ISAAC_ONLY_VARIABLES = ("PYTHONHOME", "LD_PRELOAD")
@@ -58,13 +72,16 @@ class ArduPilotLaunchTool:
     Ardupilot was already built with 'make ardupilot_sitl_default none'), the vehicle id and the vehicle model. 
     """
 
-    def __init__(self, ardupilot_dir, vehicle_id: int = 0, ardupilot_model: str = "gazebo-iris"):
+    def __init__(self, ardupilot_dir, vehicle_id: int = 0, ardupilot_model: str = "gazebo-iris",
+                 vehicle: str = "ArduCopter"):
         """Construct the ArduPilotLaunchTool object
 
         Args:
             ardupilot_dir (str): A string with the path to the Ardupilot-Autopilot directory
             vehicle_id (int): The ID of the vehicle. Defaults to 0.
             ardupilot_model (str): The vehicle model. Defaults to "iris".
+            vehicle (str): The ArduPilot vehicle for sim_vehicle.py -v ("ArduCopter", "ArduPlane", ...).
+                Defaults to "ArduCopter".
         """
 
         # Attribute that will hold the ardupilot process once it is running
@@ -80,6 +97,9 @@ class ArduPilotLaunchTool:
         # Ardupilot frame
         self.ardupilot_model = ardupilot_model
 
+        # ArduPilot vehicle (sim_vehicle.py -v) and the SITL binary it builds
+        self.vehicle = vehicle
+
         # Ardupilot FDM communication type:
         self.model = "JSON"
         
@@ -90,7 +110,7 @@ class ArduPilotLaunchTool:
         self.environment = clean_sitl_environment()
 
     def _sitl_already_exists(self):
-        return os.path.exists(f'{self.ardupilot_dir}/build/sitl/bin/arducopter')
+        return os.path.exists(f'{self.ardupilot_dir}/build/sitl/bin/{sitl_binary(self.vehicle)}')
     
     def _get_vehicle_frame(self):
         return self.ardupilot_model
@@ -99,10 +119,10 @@ class ArduPilotLaunchTool:
         """
         Method that will launch a ardupilot instance with the specified configuration
         """
-        # sim_vehicle.py -v ArduCopter -f gazebo-iris --mode JSON --console --map
+        # sim_vehicle.py -v <vehicle> -f <frame> --model JSON --console --map
         command = [
             "python3", f"{self.ardupilot_dir}/Tools/autotest/sim_vehicle.py",
-            "-v", "ArduCopter",
+            "-v", f"{self.vehicle}",
             "-f", f"{self._get_vehicle_frame()}",
             "--model", f"{self.model}",
             f"{'--no-rebuild' if self._sitl_already_exists() else ''}",
@@ -145,7 +165,7 @@ class ArduPilotLaunchTool:
             self.ardupilot_process = None
 
         # Define the keywords to search for in process names
-        keywords = ['arducopter', 'mavproxy']
+        keywords = sorted(set(SITL_BINARIES.values()) | {'mavproxy'})
 
         # Get the list of all running processes using the ps command
         ps_output = subprocess.run(['ps', '-aux'], capture_output=True, text=True)
