@@ -112,6 +112,16 @@ class ArduPilotLaunchTool:
             "--sysid", f"{self.vehicle_id + 1}",
             "--out", f"udp:127.0.0.1:{14550 + self.vehicle_id * 10}",
         ]
+        # HIL_LEO_SILVIO_SERIAL_LINKS
+        if os.environ.get("HIL_ENABLE_MAVLINK_SERIALS") == "1":
+            serial_args = ["--serial2=udpclient:127.0.0.1:14561"]
+            cm5_host = os.environ.get("HIL_CM5_HOST")
+            if cm5_host:
+                serial_args.insert(0, f"--serial1=udpclient:{cm5_host}:14560")
+            command.extend(["-A", f'"{" ".join(serial_args)}"'])
+            param_file = os.environ.get("HIL_SITL_PARAM_FILE")
+            if param_file:
+                command.extend(["--add-param-file", f'"{param_file}"'])
         command: str = " ".join(command)
         
         # Run in a seperate bash window
