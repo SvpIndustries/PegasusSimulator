@@ -7,10 +7,49 @@
 
 # System tools used to launch the ardupilot process in the brackground
 import os
+import sys
 import signal
 import tempfile
 import subprocess
 import psutil
+
+
+# Variables set by Isaac Sim's python.sh that must not leak into the SITL processes: they make the
+# system python3 (gnome-terminal, sim_vehicle.py, MAVProxy) load Isaac's Python 3.11 stdlib and libcarb.
+_ISAAC_ONLY_VARIABLES = ("PYTHONHOME", "LD_PRELOAD")
+_ISAAC_PATH_LISTS = ("PYTHONPATH", "LD_LIBRARY_PATH")
+
+
+def _isaac_roots(environment):
+    """Directories owned by the Isaac Sim install running this process."""
+    roots = {os.path.realpath(sys.prefix)}
+    isaac_path = environment.get("ISAAC_PATH")
+    if isaac_path:
+        roots.add(os.path.realpath(isaac_path))
+    return roots
+
+
+def _inside(path, roots):
+    real = os.path.realpath(path) if path else ""
+    return any(real == root or real.startswith(root + os.sep) for root in roots)
+
+
+def clean_sitl_environment(environment=None):
+    """Copy of the environment without Isaac Sim's Python and library paths.
+
+    Entries of PYTHONPATH and LD_LIBRARY_PATH outside Isaac (e.g. ROS) are kept.
+    """
+    environment = dict(os.environ if environment is None else environment)
+    roots = _isaac_roots(environment)
+    for name in _ISAAC_ONLY_VARIABLES:
+        environment.pop(name, None)
+    for name in _ISAAC_PATH_LISTS:
+        entries = [entry for entry in environment.get(name, "").split(os.pathsep) if entry and not _inside(entry, roots)]
+        if entries:
+            environment[name] = os.pathsep.join(entries)
+        else:
+            environment.pop(name, None)
+    return environment
 
 
 class ArduPilotLaunchTool:
@@ -47,8 +86,8 @@ class ArduPilotLaunchTool:
         # Create a temporary filesystem for ardupilot to write data to/from (and modify the origin rcS files)
         self.root_fs = tempfile.TemporaryDirectory()
 
-        # Set the environement variables that let Ardupilot know which vehicle model to use internally
-        self.environment = os.environ
+        # Environment for the SITL processes: a copy without Isaac Sim's Python/library paths
+        self.environment = clean_sitl_environment()
 
     def _sitl_already_exists(self):
         return os.path.exists(f'{self.ardupilot_dir}/build/sitl/bin/arducopter')
