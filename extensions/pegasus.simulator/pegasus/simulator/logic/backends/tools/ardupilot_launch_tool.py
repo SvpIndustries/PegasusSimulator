@@ -66,6 +66,18 @@ def clean_sitl_environment(environment=None):
     return environment
 
 
+SITL_WRAPPER = """#!/bin/sh
+"$@" > "{log}" 2>&1 < /dev/null &
+sitl=$!
+leader=$(ps -o pgid= -p $$ | tr -d ' ')
+while kill -0 {isaac} 2>/dev/null && kill -0 "$leader" 2>/dev/null && kill -0 "$sitl" 2>/dev/null; do
+    sleep 1
+done
+pkill -9 -P "$sitl" 2>/dev/null
+kill -9 "$sitl" 2>/dev/null
+"""
+
+
 class ArduPilotLaunchTool:
     """
     A class that manages the start/stop of a ardupilot process. It requires only the path to the Ardupilot installation (assuming that
@@ -126,8 +138,6 @@ class ArduPilotLaunchTool:
             "-f", f"{self._get_vehicle_frame()}",
             "--model", f"{self.model}",
             f"{'--no-rebuild' if self._sitl_already_exists() else ''}",
-            f"--console",
-            f"--map",
             "-I", f"{self.vehicle_id}",
             "--sysid", f"{self.vehicle_id + 1}",
             "--out", f"udp:127.0.0.1:{14550 + self.vehicle_id * 10}",
@@ -142,8 +152,21 @@ class ArduPilotLaunchTool:
             param_file = os.environ.get("HIL_SITL_PARAM_FILE")
             if param_file:
                 command.extend(["--add-param-file", f'"{param_file}"'])
+        # HIL_LEO_SILVIO_SITL_HOME: "lat,lon,alt,heading" (home = Isaac origin, e.g. for a
+        # georeferenced terrain); unset = sim_vehicle.py default location
+        home = os.environ.get("HIL_SITL_HOME")
+        if home:
+            command.append(f"--custom-location={home}")
+        # HIL_LEO_SILVIO_SITL_CONSOLE: without terminal windows MAVProxy reads its commands from
+        # <dir>/mavproxy.in (FIFO); its console and map windows stay, the HIL dashboard embeds them
+        console_dir = os.environ.get("HIL_SITL_CONSOLE_DIR")
+        command.extend(["--console", "--map"])
         command: str = " ".join(command)
-        
+
+        if console_dir:
+            self._launch_without_windows(command, console_dir)
+            return
+
         # Run in a seperate bash window
         self.ardupilot_process = subprocess.Popen(
             # ["gnome-terminal", '--disable-factory', '--', 'bash', '-c', command],
@@ -153,6 +176,40 @@ class ArduPilotLaunchTool:
             env=self.environment,
             preexec_fn=os.setsid
         )
+
+    def _launch_without_windows(self, command, console_dir):
+        """Run sim_vehicle.py without terminal windows: MAVProxy on a FIFO and a log file,
+        the SITL binary on <dir>/sitl.log."""
+        os.makedirs(console_dir, exist_ok=True)
+        fifo = os.path.join(console_dir, "mavproxy.in")
+        if not os.path.exists(fifo):
+            os.mkfifo(fifo)
+        # run_in_terminal_window.sh runs "$SITL_RITW_TERMINAL <script>" instead of an xterm.
+        # It starts it in the background, so SIGINT is ignored there and the SITL binary ignores
+        # it too: the wrapper kills SITL itself once Isaac (this process) or the launcher
+        # process group leader (killed by kill_ardupilot) is gone.
+        wrapper = os.path.join(console_dir, "sitl_terminal.sh")
+        with open(wrapper, "w") as file:
+            file.write(SITL_WRAPPER.format(log=os.path.join(console_dir, "sitl.log"), isaac=os.getpid()))
+        os.chmod(wrapper, 0o755)
+        environment = dict(self.environment)
+        environment["SITL_RITW_TERMINAL"] = wrapper
+        environment["PYTHONUNBUFFERED"] = "1"  # MAVProxy output reaches the log at once
+        # Read-write: the open does not wait for a writer and the FIFO never reaches EOF
+        stdin = os.open(fifo, os.O_RDWR)
+        try:
+            with open(os.path.join(console_dir, "mavproxy.log"), "wb") as log:
+                self.ardupilot_process = subprocess.Popen(
+                    ["bash", "-c", command],
+                    cwd=self.root_fs.name,
+                    stdin=stdin,
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    env=environment,
+                    preexec_fn=os.setsid,
+                )
+        finally:
+            os.close(stdin)
 
     def kill_ardupilot(self):
         """
